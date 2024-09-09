@@ -1,3 +1,5 @@
+use std::usize;
+
 pub const SCREEN_WIDTH: usize = 64;
 pub const SCREEN_HEIGHT: usize = 32;
 
@@ -89,6 +91,7 @@ impl Emu {
     }
 
     pub fn get_display(&self) -> &[bool] {
+        // println!("{:?}", self.screen);
         &self.screen
     }
 
@@ -115,6 +118,7 @@ impl Emu {
 
     // ----------- internals ----------- //
 
+    // stack mgmt
     fn push(&mut self, val: u16) {
         self.stack[self.sp as usize] = val;
         self.sp += 1;
@@ -135,12 +139,13 @@ impl Emu {
     }
 
     fn execute(&mut self, op: u16) {
+        // println!("{op:X}");
         let digit1 = (op & 0xF000) >> 12;
         let digit2 = (op & 0x0F00) >> 8;
         let digit3 = (op & 0x00F0) >> 4;
         let digit4 = op & 0x000F;
 
-        // see https://aquova.net/blog/chip8/8-opcodes.html
+        // see http://devernay.free.fr/hacks/chip8/C8TECH10.HTM
         match (digit1, digit2, digit3, digit4) {
             // no-op
             (0, 0, 0, 0) => {}
@@ -148,14 +153,106 @@ impl Emu {
             // clear screen
             (0, 0, 0xE, 0) => self.screen = [false; SCREEN_HEIGHT * SCREEN_WIDTH],
 
-            // jump to address
+            // return from subroutine
+            (0, 0, 0xE, 0xE) => self.pc = self.pop(),
+
+            // jump to nnn
             (1, _, _, _) => self.pc = op_as_address(op),
 
-            // assignment
-            (6, register, _, _) => self.v_reg[register as usize] = op_as_u8(op),
+            // call nnn, putting current pc on stack
+            (2, _, _, _) => {
+                self.push(self.pc);
+                self.pc = op_as_address(op);
+            }
+
+            // skips
+            (3, x, _, _) => {
+                if self.v_reg[x as usize] == op_as_u8(op) {
+                    self.pc += 2;
+                }
+            }
+            (4, x, _, _) => {
+                if self.v_reg[x as usize] != op_as_u8(op) {
+                    self.pc += 2;
+                }
+            }
+            (5, x, y, 0) => {
+                if self.v_reg[x as usize] == self.v_reg[y as usize] {
+                    self.pc += 2;
+                }
+            }
+
+            // register work
+            (6, x, _, _) => self.v_reg[x as usize] = op_as_u8(op),
+            (7, x, _, _) => self.v_reg[x as usize] += op_as_u8(op),
+            (8, x, y, 0) => self.v_reg[x as usize] = self.v_reg[y as usize],
+            (8, x, y, 1) => self.v_reg[x as usize] |= self.v_reg[y as usize],
+            (8, x, y, 2) => self.v_reg[x as usize] &= self.v_reg[y as usize],
+            (8, x, y, 3) => self.v_reg[x as usize] ^= self.v_reg[y as usize],
+            (8, x, y, 4) => {
+                if self.v_reg[x as usize] as usize + self.v_reg[y as usize] as usize > 255 {
+                    self.v_reg[0xF] = 1;
+                }
+                self.v_reg[x as usize] += self.v_reg[y as usize];
+            }
+            (8, x, y, 5) => {
+                self.v_reg[0xF] = if self.v_reg[x as usize] > self.v_reg[y as usize] {
+                    1
+                } else {
+                    0
+                };
+                self.v_reg[x as usize] -= self.v_reg[y as usize];
+            }
+
+            // set I to nnn
+            (0xA, _, _, _) => self.i_reg = op_as_address(op),
+
+            // Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
+            (0xD, x, y, num_rows) => {
+                let ram_start = self.i_reg as usize;
+                let screen_start = x_y_as_byte_offset(self.v_reg[x as usize], self.v_reg[y as usize]);
+
+                // walk the bytes of the screen and targeted ram
+                for n in 0..(num_rows as usize) {
+                    println!("ram at {} => {:?}", ram_start + n, self.ram[ram_start + n]);
+                    self.v_reg[0xF] = 0;
+
+                    // XOR, and set VF = 1 if a screen byte is erased
+                    match (self.screen[screen_start + n], self.ram[ram_start + n]) {
+                        (false, u8::MAX) => {
+                            self.screen[screen_start + n] = true;
+                        }
+                        (true, u8::MAX) => {
+                            self.screen[screen_start + n] = false;
+                            self.v_reg[0xF] = 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Set I = I + Vx.
+            (0xF, x, 1, 0xE) => self.i_reg += self.v_reg[x as usize] as u16,
+
+            // Set I = location of sprite for digit Vx.
+            (0xF, x, 2, 9) => self.i_reg = self.ram[x as usize * 5] as u16,
+
+            // Store registers V0 through Vx in memory starting at location I.
+            (0xF, x, 5, 5) => {
+                for n in 0..(x as usize) {
+                    self.ram[self.i_reg as usize + n] = self.v_reg[n];
+                }
+            }
+
+            // Read registers V0 through Vx from memory starting at location I.
+            (0xF, x, 6, 5) => {
+                for n in 0..(x as usize) {
+                    self.v_reg[n] = self.ram[self.i_reg as usize + n];
+                }
+            }
 
             // maths
-            _ => unimplemented!("unsupported op: {:X}", op),
+            _ => unimplemented!("{:X}", op),
         }
     }
 }
@@ -174,4 +271,9 @@ fn op_as_u8(op: u16) -> u8 {
 #[inline]
 fn op_as_address(op: u16) -> u16 {
     op & 0xFFF
+}
+
+#[inline]
+fn x_y_as_byte_offset(x: u8, y: u8) -> usize {
+    SCREEN_WIDTH * y as usize + x as usize
 }

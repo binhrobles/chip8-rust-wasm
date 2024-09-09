@@ -1,5 +1,7 @@
 use anyhow::anyhow;
-use sdl2::{event::Event, keyboard::Keycode, pixels::Color};
+use sdl2::{
+    event::Event, keyboard::Keycode, pixels::Color, rect::Rect, render::Canvas, video::Window,
+};
 
 use chip8_core::*;
 use std::{env, fs, process};
@@ -7,6 +9,36 @@ use std::{env, fs, process};
 const SCALE: u32 = 15;
 const WINDOW_WIDTH: u32 = (SCREEN_WIDTH as u32) * SCALE;
 const WINDOW_HEIGHT: u32 = (SCREEN_HEIGHT as u32) * SCALE;
+
+const TICKS_PER_FRAME: usize = 10;
+
+#[inline]
+fn clear_screen(canvas: &mut Canvas<Window>) {
+    canvas.set_draw_color(Color::RGB(0, 0, 0));
+    canvas.clear();
+}
+
+// TODO: consider dropping Result here?
+fn draw_screen(emu: &Emu, canvas: &mut Canvas<Window>) -> Result<(), anyhow::Error> {
+    clear_screen(canvas);
+    let screen_buffer = emu.get_display();
+
+    canvas.set_draw_color(Color::RGB(255, 255, 255));
+    for (i, pixel) in screen_buffer.iter().enumerate() {
+        if *pixel {
+            // Convert our 1D array's index into a 2D (x,y) position
+            let x = SCALE * (i % SCREEN_WIDTH) as u32;
+            let y = SCALE * (i / SCREEN_WIDTH) as u32;
+
+            // Draw a rectangle at (x,y), scaled up by our SCALE value
+            let rect = Rect::new(x as i32, y as i32, SCALE, SCALE);
+            canvas.fill_rect(rect).map_err(|e| anyhow!(e))?;
+        }
+    }
+
+    canvas.present();
+    Ok(())
+}
 
 fn main() -> Result<(), anyhow::Error> {
     let args = env::args().collect::<Vec<_>>();
@@ -32,10 +64,7 @@ fn main() -> Result<(), anyhow::Error> {
         .build()?;
 
     let mut canvas = window.into_canvas().present_vsync().build()?;
-
-    canvas.set_draw_color(Color::RGB(255, 0, 0));
-    canvas.clear();
-    canvas.present();
+    clear_screen(&mut canvas);
 
     let mut event_pump = sdl_context.event_pump().map_err(|e| anyhow!(e))?;
     'game_loop: loop {
@@ -52,9 +81,12 @@ fn main() -> Result<(), anyhow::Error> {
             }
         }
 
-        emu.tick();
-        canvas.clear();
-        canvas.present();
+        for _ in 0..TICKS_PER_FRAME {
+            emu.tick();
+        }
+        emu.tick_timers();
+
+        draw_screen(&emu, &mut canvas)?;
     }
 
     Ok(())
